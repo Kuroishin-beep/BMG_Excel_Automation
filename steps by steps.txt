@@ -1,0 +1,23 @@
+IMPORTANT!!! Read this text before using the system.
+
+1. Mag-attach ng Excel file  
+   I-upload ang Excel file sa system.
+
+2. Basahin at ipakita ang laman ng file  
+   Awtomatikong babasahin ng system ang file at ipapakita ang lahat ng rows at columns.
+
+3. Gamitin ang search filter  
+   I-type ang item na hahanapin at maha-highlight ang mga tugmang data.
+
+4. I-review ang mga nahanap na rows  
+   Makikita ang lahat ng rows na may parehong laman.
+
+5. Pumili ng gagawin  
+   - Mag-keep ng isang row  
+   - I-delete lahat ng rows na pare-pareho ang laman
+
+6. I-apply agad ang changes  
+   Awtomatikong maa-update ang file base sa napiling aksyon.
+
+7. I-download ang updated Excel file  
+   Maida-download ang bagong version ng file na pareho ang file name at formatting, pero updated na ang data.
