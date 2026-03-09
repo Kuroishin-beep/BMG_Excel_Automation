@@ -49,59 +49,43 @@ def go_to_segregation():
 
 def get_reversed_indices(df):
     """
-    Return list of row indices that belong to 'Reversed' journal groups.
+    Return list of row indices that belong to 'Reversed/Reversal' journal groups.
 
-    Strategy:
-    1. Find every row that contains the word 'Reversed' in any cell.
-    2. For journal-style reports (looseleaf format), rows are grouped by a
-       section-header row (e.g. "ID 104314 Reversed: ...") followed by
-       transaction lines and a "Total" row.  We identify each such group's
-       bounds and include ALL rows in that group — header, lines, Total,
-       and the blank separator row that follows — so the output is clean.
+    A journal group starts with a section-header row whose first column matches
+    "ID XXXXXX Reversed..." or "ID XXXXXX ... Reversal...".
+    Only groups whose HEADER contains Reversed/Reversal are removed — individual
+    transaction lines inside a normal group that happen to mention 'reversal'
+    (e.g. 'Unpaid/Lates Reversal') are intentionally ignored.
+
+    Each matched group spans from its header row through the closing 'Total' row
+    and the blank separator that follows.
     """
-    # Step 1: flag every row that directly mentions 'Reversed'
-    direct_mask = pd.Series([False] * len(df), index=df.index)
-    for col in df.columns:
-        try:
-            direct_mask |= df[col].astype(str).str.contains(r"revers(ed|al)", case=False, na=False, regex=True)
-        except Exception:
-            continue
-
-    reversed_rows = set(df[direct_mask].index.tolist())
-
-    # Step 2: expand each flagged row to cover its full journal group.
-    # A group starts at the section-header row (first column contains "ID …")
-    # and ends after the next "Total" row + optional blank row.
     first_col = df.columns[0]
     all_indices = df.index.tolist()
-    idx_pos = {idx: pos for pos, idx in enumerate(all_indices)}  # index → positional offset
 
     expanded = set()
-    for idx in reversed_rows:
-        pos = idx_pos[idx]
 
-        # Walk backwards to find the group header (row whose first cell starts with "ID ")
-        group_start_pos = pos
-        for back in range(pos, max(pos - 20, -1), -1):
-            cell_val = str(df.iloc[back][first_col]).strip()
-            if re.match(r"^ID\s+\d+", cell_val, re.IGNORECASE):
-                group_start_pos = back
-                break
+    for pos, idx in enumerate(all_indices):
+        cell_val = str(df.iloc[pos][first_col]).strip()
 
-        # Walk forwards to find the "Total" row that closes this group,
-        # then include the blank separator row after it.
-        group_end_pos = pos
-        for fwd in range(pos, min(pos + 50, len(all_indices))):
-            cell_val = str(df.iloc[fwd][first_col]).strip().lower()
-            if cell_val == "total":
-                group_end_pos = fwd
-                # also grab the blank row that follows (if it exists)
-                if fwd + 1 < len(all_indices):
-                    group_end_pos = fwd + 1
-                break
+        # Only trigger on section-header rows: "ID <number> ... Reversed/Reversal ..."
+        if re.match(r"^ID\s+\d+", cell_val, re.IGNORECASE) and \
+           re.search(r"revers(ed|al)", cell_val, re.IGNORECASE):
 
-        for p in range(group_start_pos, group_end_pos + 1):
-            expanded.add(all_indices[p])
+            group_start_pos = pos
+
+            # Walk forward to find the closing 'Total' row (+ trailing blank)
+            group_end_pos = pos
+            for fwd in range(pos, min(pos + 100, len(all_indices))):
+                fwd_val = str(df.iloc[fwd][first_col]).strip().lower()
+                if fwd_val == "total":
+                    group_end_pos = fwd
+                    if fwd + 1 < len(all_indices):
+                        group_end_pos = fwd + 1
+                    break
+
+            for p in range(group_start_pos, group_end_pos + 1):
+                expanded.add(all_indices[p])
 
     return sorted(list(expanded))
 
@@ -254,13 +238,13 @@ def render_workspace_page():
 
         if reversed_indices:
             st.markdown(
-                f'<div class="info-box-red">🗑️ {len(reversed_indices)} "Reversed" '
+                f'<div class="info-box-red">🗑️ {len(reversed_indices)} "Reversed/Reversal" '
                 f'row{"s" if len(reversed_indices) != 1 else ""} will be removed</div>',
                 unsafe_allow_html=True
             )
         else:
             st.markdown(
-                '<div class="info-box-red">No "Reversed" rows found in this file.</div>',
+                '<div class="info-box-red">No "Reversed" or "Reversal" rows found in this file.</div>',
                 unsafe_allow_html=True
             )
 
@@ -275,7 +259,7 @@ def render_workspace_page():
         st.markdown(f"""
             <div class="legend-container">
                 <div class="legend-title">Color Guide:</div>
-                <span class="legend-item" style='background: {COLOR_CODES["RED_HIGHLIGHT"]};'>Reversed — will be deleted</span>
+                <span class="legend-item" style='background: {COLOR_CODES["RED_HIGHLIGHT"]};'>Reversed / Reversal — will be deleted</span>
             </div>
         """, unsafe_allow_html=True)
 
@@ -298,7 +282,7 @@ def render_workspace_page():
                     <span class="stat-value">{len(df)}</span>
                 </div>
                 <div class="stat-row">
-                    <span class="stat-label">Reversed Rows Removed:</span>
+                    <span class="stat-label">Reversed/Reversal Rows Removed:</span>
                     <span class="stat-value" style="color: #dc2626;">{len(reversed_indices)}</span>
                 </div>
                 <div class="stat-row">
@@ -339,6 +323,6 @@ def render_workspace_page():
             )
         else:
             st.markdown(
-                '<div class="info-box-green">No "Reversed" rows were found — nothing to clean up.</div>',
+                '<div class="info-box-green">No "Reversed" or "Reversal" rows were found — nothing to clean up.</div>',
                 unsafe_allow_html=True
             )
