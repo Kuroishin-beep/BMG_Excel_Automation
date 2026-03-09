@@ -63,7 +63,7 @@ def get_reversed_indices(df):
     direct_mask = pd.Series([False] * len(df), index=df.index)
     for col in df.columns:
         try:
-            direct_mask |= df[col].astype(str).str.contains(r"revers(ed|al)", case=False, na=False, regex=True))
+            direct_mask |= df[col].astype(str).str.contains(r"revers(ed|al)", case=False, na=False, regex=True)
         except Exception:
             continue
 
