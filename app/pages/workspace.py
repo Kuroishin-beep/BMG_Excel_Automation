@@ -219,10 +219,16 @@ def render_workspace_page():
 
     df = st.session_state.df_original
 
-    # Cache so computation only runs once per uploaded file, not on every rerun
-    if 'reversed_indices' not in st.session_state or st.session_state.get('_reversed_cache_key') != id(df):
+    # Cache keyed on filename — id(df) is unsafe because Python reuses memory
+    # addresses, meaning a newly uploaded file can get the same id() as the old
+    # one and incorrectly receive stale reversed_indices from the previous file.
+    cache_key = st.session_state.get('original_filename', '__unknown__')
+    if 'reversed_indices' not in st.session_state or st.session_state.get('_reversed_cache_key') != cache_key:
         st.session_state.reversed_indices = set(get_reversed_indices(df))
-        st.session_state._reversed_cache_key = id(df)
+        st.session_state._reversed_cache_key = cache_key
+        # Clear any stale processed file from a previous upload
+        st.session_state.pop('processed_file_data', None)
+        st.session_state.pop('processed_df', None)
 
     reversed_indices = st.session_state.reversed_indices
     df_cleaned = df.drop(list(reversed_indices), errors='ignore')
@@ -302,7 +308,7 @@ def render_workspace_page():
             output_name = f"{base}_Cleaned.xlsx"
 
             # Generate Excel bytes once and cache them
-            if 'processed_file_data' not in st.session_state or st.session_state.get('_reversed_cache_key') != id(df):
+            if 'processed_file_data' not in st.session_state or st.session_state.get('_reversed_cache_key') != cache_key:
                 buffer = BytesIO()
                 with st.spinner("Generating Excel file..."):
                     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
