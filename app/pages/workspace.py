@@ -1,28 +1,21 @@
 """
 Workspace page module for the Excel Duplicate Delete application.
 
-This module contains the implementation of the main processing page where
-users interact with their uploaded Excel data. It includes:
-- Search functionality with auto-suggestions based on Excel data
-- Deletion queue management system
-- Real-time preview of changes
-- Data visualization with color-coded highlighting
-- File download functionality with preserved formatting
-- Post-download modal for segregation option
-- Seamless data transfer to segregation module
+Simplified version: auto-deletes all rows containing "Reversed" (case-insensitive),
+shows before/after preview, and allows download of cleaned file.
 """
 
 import streamlit as st
 import pandas as pd
 from pathlib import Path
 import sys
-from pathlib import Path
 import re
-# Add the parent directory to sys.path to import from utils and constants
+from io import BytesIO
+
 sys.path.append(str(Path(__file__).parent.parent))
 
-from utils import load_logo, process_excel_with_formatting, apply_row_highlighting, get_rows_to_delete_logic, get_queue_statistics
-from constants import CSS_STYLES, UI_LABELS, COLOR_CODES
+from utils import load_logo
+from constants import UI_LABELS, COLOR_CODES
 from config import AppConfig
 
 
@@ -34,7 +27,6 @@ def go_to_home():
     st.session_state.current_matches = []
     st.session_state.uploaded_file = None
     st.session_state.original_filename = None
-    # Clear processed data
     if 'processed_df' in st.session_state:
         del st.session_state.processed_df
     if 'processed_file_data' in st.session_state:
@@ -43,44 +35,100 @@ def go_to_home():
 
 def go_to_segregation():
     """Navigate to segregation page with processed data."""
-    # Ensure we have the latest processed dataframe ready for segregation
-    queue_list = sorted(list(st.session_state.deletion_queue))
-    
-    if queue_list:
-        # Create the cleaned dataframe
-        st.session_state.processed_df = st.session_state.df_original.drop(queue_list, errors='ignore')
+    df = st.session_state.df_original
+    reversed_indices = get_reversed_indices(df)
+
+    if reversed_indices:
+        st.session_state.processed_df = df.drop(reversed_indices, errors='ignore')
     else:
-        # If no deletions, use the original data
-        st.session_state.processed_df = st.session_state.df_original.copy()
-    
-    # Navigate to segregation page
+        st.session_state.processed_df = df.copy()
+
     st.session_state.current_page = 'segregation'
     st.rerun()
 
 
+def get_reversed_indices(df):
+    """
+    Return list of row indices that belong to 'Reversed' journal groups.
+
+    Strategy:
+    1. Find every row that contains the word 'Reversed' in any cell.
+    2. For journal-style reports (looseleaf format), rows are grouped by a
+       section-header row (e.g. "ID 104314 Reversed: ...") followed by
+       transaction lines and a "Total" row.  We identify each such group's
+       bounds and include ALL rows in that group — header, lines, Total,
+       and the blank separator row that follows — so the output is clean.
+    """
+    # Step 1: flag every row that directly mentions 'Reversed'
+    direct_mask = pd.Series([False] * len(df), index=df.index)
+    for col in df.columns:
+        try:
+            direct_mask |= df[col].astype(str).str.contains("reversed", case=False, na=False)
+        except Exception:
+            continue
+
+    reversed_rows = set(df[direct_mask].index.tolist())
+
+    # Step 2: expand each flagged row to cover its full journal group.
+    # A group starts at the section-header row (first column contains "ID …")
+    # and ends after the next "Total" row + optional blank row.
+    first_col = df.columns[0]
+    all_indices = df.index.tolist()
+    idx_pos = {idx: pos for pos, idx in enumerate(all_indices)}  # index → positional offset
+
+    expanded = set()
+    for idx in reversed_rows:
+        pos = idx_pos[idx]
+
+        # Walk backwards to find the group header (row whose first cell starts with "ID ")
+        group_start_pos = pos
+        for back in range(pos, max(pos - 20, -1), -1):
+            cell_val = str(df.iloc[back][first_col]).strip()
+            if re.match(r"^ID\s+\d+", cell_val, re.IGNORECASE):
+                group_start_pos = back
+                break
+
+        # Walk forwards to find the "Total" row that closes this group,
+        # then include the blank separator row after it.
+        group_end_pos = pos
+        for fwd in range(pos, min(pos + 50, len(all_indices))):
+            cell_val = str(df.iloc[fwd][first_col]).strip().lower()
+            if cell_val == "total":
+                group_end_pos = fwd
+                # also grab the blank row that follows (if it exists)
+                if fwd + 1 < len(all_indices):
+                    group_end_pos = fwd + 1
+                break
+
+        for p in range(group_start_pos, group_end_pos + 1):
+            expanded.add(all_indices[p])
+
+    return sorted(list(expanded))
+
+
+def highlight_reversed(row, reversed_set):
+    """Apply red highlight to rows marked for deletion."""
+    if row.name in reversed_set:
+        return [f'background-color: {COLOR_CODES["RED_HIGHLIGHT"]}'] * len(row)
+    return [''] * len(row)
+
+
 def render_workspace_page():
     """
-    Render the workspace page with 3-column layout for data processing.
-    
-    This function creates the main processing interface with three distinct
-    columns: search and queue management (left), queue review (center),
-    and preview/download (right). Each column handles specific aspects
-    of the duplicate removal workflow.
+    Render the simplified workspace page.
+
+    Shows:
+    - Left column: Original data with reversed rows highlighted in red
+    - Right column: Cleaned data preview (reversed rows removed)
+    - Download button for the cleaned file
     """
-    
-    # Initialize modal state if not exists
+
     if 'show_modal' not in st.session_state:
         st.session_state.show_modal = False
-    
-    # Custom CSS for colorful clean design
+
+    # --- CSS ---
     st.markdown("""
         <style>
-        /* Main color scheme */
-        .orange-section { background: linear-gradient(135deg, #fff7ed 0%, #ffedd5 100%); }
-        .blue-section { background: linear-gradient(135deg, #eff6ff 0%, #dbeafe 100%); }
-        .green-section { background: linear-gradient(135deg, #f0fdf4 0%, #dcfce7 100%); }
-        
-        /* Navigation Bar */
         .nav-bar {
             background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
             padding: 1.5rem 2rem;
@@ -88,205 +136,72 @@ def render_workspace_page():
             margin-bottom: 2rem;
             box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
         }
-        .nav-title {
-            color: white !important;
-            font-size: 1.8rem;
-            font-weight: 700;
-            margin: 0;
-        }
-        .nav-subtitle {
-            color: white !important;
-            font-size: 1rem;
-            margin: 0.25rem 0 0 0;
-        }
-        .logo-container {
-            display: flex;
-            align-items: center;
-            gap: 1rem;
-        }
-        .logo-image {
-            height: 50px;
-            width: auto;
-        }
-        
-        /* Section Headers */
-        .section-header-orange {
-            background: linear-gradient(135deg, #f97316 0%, #fb923c 100%);
-            color: white;
-            padding: 1rem 1.5rem;
-            border-radius: 12px;
-            font-size: 1.3rem;
-            font-weight: 700;
-            text-align: center;
-            margin-bottom: 1.5rem;
-            box-shadow: 0 4px 6px -1px rgba(249, 115, 22, 0.3);
-        }
-        .section-header-blue {
-            background: linear-gradient(135deg, #0284c7 0%, #38bdf8 100%);
-            color: white;
-            padding: 1rem 1.5rem;
-            border-radius: 12px;
-            font-size: 1.3rem;
-            font-weight: 700;
-            text-align: center;
-            margin-bottom: 1.5rem;
-            box-shadow: 0 4px 6px -1px rgba(2, 132, 199, 0.3);
+        .nav-title  { color: white !important; font-size: 1.8rem; font-weight: 700; margin: 0; }
+        .nav-subtitle { color: white !important; font-size: 1rem; margin: 0.25rem 0 0 0; }
+        .logo-container { display: flex; align-items: center; gap: 1rem; }
+        .logo-image { height: 50px; width: auto; }
+
+        .section-header-red {
+            background: linear-gradient(135deg, #dc2626 0%, #ef4444 100%);
+            color: white; padding: 1rem 1.5rem; border-radius: 12px;
+            font-size: 1.3rem; font-weight: 700; text-align: center;
+            margin-bottom: 1.5rem; box-shadow: 0 4px 6px -1px rgba(220,38,38,0.3);
         }
         .section-header-green {
             background: linear-gradient(135deg, #16a34a 0%, #4ade80 100%);
-            color: white;
-            padding: 1rem 1.5rem;
-            border-radius: 12px;
-            font-size: 1.3rem;
-            font-weight: 700;
-            text-align: center;
-            margin-bottom: 1.5rem;
-            box-shadow: 0 4px 6px -1px rgba(22, 163, 74, 0.3);
+            color: white; padding: 1rem 1.5rem; border-radius: 12px;
+            font-size: 1.3rem; font-weight: 700; text-align: center;
+            margin-bottom: 1.5rem; box-shadow: 0 4px 6px -1px rgba(22,163,74,0.3);
         }
-        
-        /* Info boxes */
-        .info-box-orange {
-            background: #fff7ed;
-            border-left: 5px solid #f97316;
-            padding: 1rem;
-            border-radius: 8px;
-            margin: 1rem 0;
-            color: #7c2d12;
-            font-size: 1rem;
-        }
-        .info-box-blue {
-            background: #eff6ff;
-            border-left: 5px solid #0284c7;
-            padding: 1rem;
-            border-radius: 8px;
-            margin: 1rem 0;
-            color: #1e3a8a;
-            font-size: 1rem;
+
+        .info-box-red {
+            background: #fef2f2; border-left: 5px solid #dc2626;
+            padding: 1rem; border-radius: 8px; margin: 1rem 0;
+            color: #7f1d1d; font-size: 1rem;
         }
         .info-box-green {
-            background: #f0fdf4;
-            border-left: 5px solid #16a34a;
-            padding: 1rem;
-            border-radius: 8px;
-            margin: 1rem 0;
-            color: #14532d;
-            font-size: 1rem;
+            background: #f0fdf4; border-left: 5px solid #16a34a;
+            padding: 1rem; border-radius: 8px; margin: 1rem 0;
+            color: #14532d; font-size: 1rem;
         }
-        
-        /* Suggestion container */
-        .suggestion-container {
-            background: #fef3c7;
-            border: 2px solid #fbbf24;
-            border-radius: 12px;
-            padding: 1rem;
-            margin: 1rem 0;
-        }
-        .suggestion-label {
-            color: #78350f;
-            font-weight: 600;
-            font-size: 0.95rem;
-            margin-bottom: 0.5rem;
-        }
-        
-        /* Stats box */
+
         .stats-box {
-            background: white;
-            border: 2px solid #e5e7eb;
-            border-radius: 12px;
-            padding: 1.25rem;
-            margin: 1rem 0;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+            background: white; border: 2px solid #e5e7eb; border-radius: 12px;
+            padding: 1.25rem; margin: 1rem 0; box-shadow: 0 2px 4px rgba(0,0,0,0.05);
         }
         .stat-row {
-            display: flex;
-            justify-content: space-between;
-            padding: 0.75rem 0;
-            border-bottom: 1px solid #f3f4f6;
-            font-size: 1.05rem;
+            display: flex; justify-content: space-between;
+            padding: 0.75rem 0; border-bottom: 1px solid #f3f4f6; font-size: 1.05rem;
         }
-        .stat-row:last-child {
-            border-bottom: none;
-        }
-        .stat-label {
-            color: #6b7280;
-            font-weight: 600;
-        }
-        .stat-value {
-            color: #1f2937;
-            font-weight: 700;
-        }
-        
-        /* Legend */
+        .stat-row:last-child { border-bottom: none; }
+        .stat-label { color: #6b7280; font-weight: 600; }
+        .stat-value { color: #1f2937; font-weight: 700; }
+
         .legend-container {
-            background: white;
-            border: 2px solid #e5e7eb;
-            border-radius: 12px;
-            padding: 1rem;
-            margin-top: 1rem;
+            background: white; border: 2px solid #e5e7eb;
+            border-radius: 12px; padding: 1rem; margin-top: 1rem;
         }
-        .legend-title {
-            font-weight: 700;
-            color: #374151;
-            margin-bottom: 0.5rem;
-            font-size: 1rem;
-        }
+        .legend-title { font-weight: 700; color: #374151; margin-bottom: 0.5rem; font-size: 1rem; }
         .legend-item {
-            display: inline-block;
-            padding: 4px 12px;
-            border-radius: 6px;
-            margin: 0 8px 8px 0;
-            font-size: 0.95rem;
-            font-weight: 500;
+            display: inline-block; padding: 4px 12px; border-radius: 6px;
+            margin: 0 8px 8px 0; font-size: 0.95rem; font-weight: 500;
         }
-        
-        /* Streamlit element overrides */
-        .stTextInput > div > div > input {
-            border-radius: 10px;
-            border: 2px solid #f97316;
-            font-size: 1.05rem;
-            padding: 0.75rem;
-        }
-        .stTextInput > div > div > input:focus {
-            border-color: #fb923c;
-            box-shadow: 0 0 0 3px rgba(249, 115, 22, 0.1);
-        }
-        
-        /* Button styling */
+
         .stButton > button {
-            border-radius: 10px;
-            font-weight: 600;
-            font-size: 1rem;
-            padding: 0.75rem 1.5rem;
-            transition: all 0.2s;
+            border-radius: 10px; font-weight: 600; font-size: 1rem;
+            padding: 0.75rem 1.5rem; transition: all 0.2s;
         }
-        .stButton > button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(0,0,0,0.15);
-        }
-        
-        /* Download button special styling */
+        .stButton > button:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
         .stDownloadButton > button {
             background: linear-gradient(135deg, #16a34a 0%, #22c55e 100%);
-            color: white;
-            border: none;
-            font-size: 1.1rem;
-            font-weight: 700;
-            padding: 1rem;
-        }
-        
-        /* Dataframe styling */
-        .dataframe {
-            border-radius: 12px;
-            overflow: hidden;
-            border: 2px solid #e5e7eb;
+            color: white; border: none; font-size: 1.1rem;
+            font-weight: 700; padding: 1rem;
         }
         </style>
     """, unsafe_allow_html=True)
-    
-    # Load logo
+
+    # --- Nav Bar ---
     logo_url = load_logo()
-    
-    # Navigation Bar with Back Link and Logo
     if logo_url:
         st.markdown(f"""
             <div class="nav-bar">
@@ -306,237 +221,124 @@ def render_workspace_page():
                 <p class="nav-subtitle">{UI_LABELS['WORKSPACE_SUBTITLE']}</p>
             </div>
         """, unsafe_allow_html=True)
-    
-    # Navigation button for segregation
+
+    # --- Book Segregation nav button ---
     col_segregate, col_space = st.columns([1.5, 5.5])
     with col_segregate:
         if st.button("📚 Book Segregation", use_container_width=True, key="direct_segregation_btn", type="secondary"):
             go_to_segregation()
-    
-    # Verify we have data
+
+    # --- Guard ---
     if st.session_state.df_original is None:
         st.error("No file loaded. Please return to home and upload a file.")
         st.stop()
-    
-    # Create three-column layout for the main interface
-    column_left, column_center, column_right = st.columns([3, 2, 3])
 
-    # =============================================================================================
-    # LEFT COLUMN: SEARCH AND ADD TO QUEUE (ORANGE)
-    # =============================================================================================
-    
-    with column_left:
-        st.markdown('<div class="section-header-orange">Step 1: Search for Duplicates</div>', unsafe_allow_html=True)
-        
-        # Generate search suggestions from Excel data
-        if 'search_suggestions' not in st.session_state or st.session_state.search_suggestions is None:
-            all_values = set()
-            for col in st.session_state.df_original.columns:
-                try:
-                    unique_vals = st.session_state.df_original[col].dropna().astype(str).unique()
-                    all_values.update([v for v in unique_vals if len(v) > 0][:100])
-                except:
-                    continue
-            st.session_state.search_suggestions = sorted(list(all_values))
-        
-        # Search input field
-        search_text = st.text_input(
-            "Type to search your data", 
-            help="Search is case-sensitive",
-            key="search_input_workspace"
-        )
-        
-        # --- SEARCH LOGIC ---
-        if search_text:
-            df = st.session_state.df_original
-            
-            # 1. Base Search: Find rows explicitly containing the text
-            found_indices = get_rows_to_delete_logic(df, search_text)
-            
-            # Helper function to find column names case-insensitively
-            def get_col_name(candidates):
-                cols_map = {c.lower().strip(): c for c in df.columns}
-                for cand in candidates:
-                    if cand in cols_map:
-                        return cols_map[cand]
-                return None
+    df = st.session_state.df_original
 
-            # 2. Journal ID Logic: Find siblings via ID
-            id_col = get_col_name(["journal id", "journal no", "id", "transaction id", "ref no", "reference"])
-            
-            if id_col and found_indices:
-                matched_ids = df.loc[found_indices, id_col].unique()
-                # Filter out empty/NaN IDs
-                valid_ids = [x for x in matched_ids if pd.notna(x) and str(x).strip() != ""]
-                
-                if valid_ids:
-                    related_by_id = df[df[id_col].isin(valid_ids)].index.tolist()
-                    found_indices = list(set(found_indices + related_by_id))
+    # Cache so computation only runs once per uploaded file, not on every rerun
+    if 'reversed_indices' not in st.session_state or st.session_state.get('_reversed_cache_key') != id(df):
+        st.session_state.reversed_indices = set(get_reversed_indices(df))
+        st.session_state._reversed_cache_key = id(df)
 
-            # 3. Narration Logic: Find siblings via Description/Narration
-            narr_col = get_col_name(["narration", "description", "particulars", "memo", "notes"])
-            
-            if narr_col and found_indices:
-                # Get the narration text from the rows we have found so far
-                matched_narrations = df.loc[found_indices, narr_col].unique()
-                # Filter out empty/NaN narrations to avoid selecting all blank rows
-                valid_narrations = [x for x in matched_narrations if pd.notna(x) and str(x).strip() != ""]
-                
-                if valid_narrations:
-                    # Find ALL rows that have these specific narrations
-                    related_by_narr = df[df[narr_col].isin(valid_narrations)].index.tolist()
-                    found_indices = list(set(found_indices + related_by_narr))
-            
-            st.session_state.current_matches = found_indices
+    reversed_indices = st.session_state.reversed_indices
+    df_cleaned = df.drop(list(reversed_indices), errors='ignore')
+
+    # =========================================================
+    # TWO-COLUMN LAYOUT: BEFORE  |  AFTER
+    # =========================================================
+    col_before, col_after = st.columns(2)
+
+    # --- BEFORE (left) ---
+    with col_before:
+        st.markdown('<div class="section-header-red">Before: Original Data</div>', unsafe_allow_html=True)
+
+        if reversed_indices:
+            st.markdown(
+                f'<div class="info-box-red">🗑️ {len(reversed_indices)} "Reversed" '
+                f'row{"s" if len(reversed_indices) != 1 else ""} will be removed</div>',
+                unsafe_allow_html=True
+            )
         else:
-            st.session_state.current_matches = []
-        # ------------------------------------------------------
-
-        # Display match count and add button
-        match_count = len(st.session_state.current_matches)
-        
-        if match_count > 0:
-            st.markdown(f'<div class="info-box-orange">✓ Found {match_count} related rows</div>', unsafe_allow_html=True)
-            
-            add_button_label = f"Add {match_count} row{'s' if match_count != 1 else ''} to deletion queue"
-            if st.button(add_button_label, use_container_width=True, type="primary"):
-                st.session_state.deletion_queue.update(st.session_state.current_matches)
-                st.session_state.current_matches = []
-                st.rerun()
-        elif search_text:
-            st.markdown('<div class="info-box-orange">No matching rows found. Try a different search term.</div>', unsafe_allow_html=True)
-
-        # Display dataframe with color-coded highlighting
-        st.write("")
-        st.markdown("**Your Excel Data:**")
-        
-        df_display = st.session_state.df_original.copy()
-
-        def apply_row_highlighting_wrapper(row):
-            """Wrapper to apply row highlighting with current session state values."""
-            return apply_row_highlighting(
-                row, 
-                st.session_state.deletion_queue, 
-                st.session_state.current_matches
+            st.markdown(
+                '<div class="info-box-red">No "Reversed" rows found in this file.</div>',
+                unsafe_allow_html=True
             )
 
         try:
-            styled_dataframe = df_display.style.apply(apply_row_highlighting_wrapper, axis=1)
-            st.dataframe(styled_dataframe, height=AppConfig.DATAFRAME_HEIGHT, use_container_width=True)
-        except Exception as e:
-            st.dataframe(df_display, height=AppConfig.DATAFRAME_HEIGHT, use_container_width=True)
-        
-        # Legend for color coding
+            styled = df.style.apply(
+                lambda row: highlight_reversed(row, reversed_indices), axis=1
+            )
+            st.dataframe(styled, height=AppConfig.DATAFRAME_HEIGHT, use_container_width=True)
+        except Exception:
+            st.dataframe(df, height=AppConfig.DATAFRAME_HEIGHT, use_container_width=True)
+
         st.markdown(f"""
             <div class="legend-container">
                 <div class="legend-title">Color Guide:</div>
-                <span class="legend-item" style='background: {COLOR_CODES["RED_HIGHLIGHT"]};'>Will be deleted</span>
-                <span class="legend-item" style='background: {COLOR_CODES["YELLOW_HIGHLIGHT"]};'>Transaction group found</span>
+                <span class="legend-item" style='background: {COLOR_CODES["RED_HIGHLIGHT"]};'>Reversed — will be deleted</span>
             </div>
         """, unsafe_allow_html=True)
 
-    # =============================================================================================
-    # CENTER COLUMN: REVIEW AND MANAGE QUEUE (BLUE)
-    # =============================================================================================
-    
-    with column_center:
-        st.markdown('<div class="section-header-blue">Step 2: Review Queue</div>', unsafe_allow_html=True)
-        
-        # Get sorted list of queued rows
-        queue_list = sorted(list(st.session_state.deletion_queue))
-        
-        if queue_list:
-            st.markdown(f'<div class="info-box-blue">{len(queue_list)} row{"s" if len(queue_list) != 1 else ""} marked for deletion</div>', unsafe_allow_html=True)
-            
-            # Display the rows currently in the deletion queue
-            delete_dataframe = st.session_state.df_original.iloc[queue_list].copy()
-            delete_dataframe.insert(0, "Row #", [pandas_idx + 2 for pandas_idx in queue_list])
-            
-            st.markdown("**Rows to be deleted:**")
-            st.dataframe(delete_dataframe, height=AppConfig.PREVIEW_HEIGHT, use_container_width=True)
+    # --- AFTER (right) ---
+    with col_after:
+        st.markdown('<div class="section-header-green">After: Cleaned Data & Download</div>', unsafe_allow_html=True)
 
-            # Disregard all button
-            st.write("")
-            if st.button("Clear All from Queue", use_container_width=True, type="secondary"):
-                st.session_state.deletion_queue = set()
-                st.rerun()
+        st.markdown(
+            f'<div class="info-box-green">✅ {len(df_cleaned)} row{"s" if len(df_cleaned) != 1 else ""} remaining after cleanup</div>',
+            unsafe_allow_html=True
+        )
 
-        else:
-            st.markdown('<div class="info-box-blue">Your deletion queue is empty. Search and add rows to delete them.</div>', unsafe_allow_html=True)
+        st.dataframe(df_cleaned, height=AppConfig.DATAFRAME_HEIGHT, use_container_width=True)
 
-    # =============================================================================================
-    # RIGHT COLUMN: PREVIEW AND DOWNLOAD (GREEN)
-    # =============================================================================================
-
-    with column_right:
-        st.markdown('<div class="section-header-green">Step 3: Preview & Download</div>', unsafe_allow_html=True)
-        
-        # Get current queue list
-        queue_list = sorted(list(st.session_state.deletion_queue))
-        
-        # Create the specific view you see on screen
-        df_to_show = st.session_state.df_original.drop(queue_list, errors='ignore')
-        
-        st.markdown("**Final Result Preview:**")
-        st.dataframe(df_to_show, height=AppConfig.DATAFRAME_HEIGHT, use_container_width=True)
-        
-        # Display statistics
-        stats = get_queue_statistics(st.session_state.df_original, st.session_state.deletion_queue)
-        
+        # Stats
         st.markdown(f"""
             <div class="stats-box">
                 <div class="stat-row">
                     <span class="stat-label">Original Rows:</span>
-                    <span class="stat-value">{stats['original_rows']}</span>
+                    <span class="stat-value">{len(df)}</span>
                 </div>
                 <div class="stat-row">
-                    <span class="stat-label">Rows to Delete:</span>
-                    <span class="stat-value" style="color: #dc2626;">{stats['rows_to_delete']}</span>
+                    <span class="stat-label">Reversed Rows Removed:</span>
+                    <span class="stat-value" style="color: #dc2626;">{len(reversed_indices)}</span>
                 </div>
                 <div class="stat-row">
                     <span class="stat-label">Final Rows:</span>
-                    <span class="stat-value" style="color: #16a34a;">{stats['final_rows']}</span>
+                    <span class="stat-value" style="color: #16a34a;">{len(df_cleaned)}</span>
                 </div>
             </div>
         """, unsafe_allow_html=True)
-        
+
         st.write("---")
-        
+
         # Download button
-        if queue_list:
-            from io import BytesIO
-            
-            # Generate filename
+        if reversed_indices:
+            # Build the output filename
             original = st.session_state.get("original_filename", "Excel_File.xlsx")
             base = re.sub(r"\.xlsx?$", "", original, flags=re.IGNORECASE)
             output_name = f"{base}_Cleaned.xlsx"
 
-            # ------------------------------------------------------------------
-            # Download EXACTLY what is in the preview 
-            # ------------------------------------------------------------------
-            buffer = BytesIO()
-            with st.spinner("Generating  Excel file..."):
-                # pandas to write the dataframe directly to a new file.
-                # index=False ensures we don't add an extra number column on the left.
-                with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-                    df_to_show.to_excel(writer, index=False)
-                
-                # Get the data
-                processed_excel_data = buffer.getvalue()
-                
-                # Update session state for the next page
-                st.session_state.processed_file_data = processed_excel_data
-                st.session_state.processed_df = df_to_show
-            
+            # Generate Excel bytes once and cache them
+            if 'processed_file_data' not in st.session_state or st.session_state.get('_reversed_cache_key') != id(df):
+                buffer = BytesIO()
+                with st.spinner("Generating Excel file..."):
+                    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+                        df_cleaned.to_excel(writer, index=False)
+                    st.session_state.processed_file_data = buffer.getvalue()
+                    st.session_state.processed_df = df_cleaned
+
+            processed_excel_data = st.session_state.processed_file_data
+
             st.download_button(
-                label="Download Cleaned Excel File",
+                label="📥 Download Cleaned Excel File",
                 data=processed_excel_data,
                 file_name=output_name,
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
                 type="primary",
                 on_click=lambda: st.session_state.update({'show_modal': True}),
-                icon="📥"
             )
         else:
-            st.markdown('<div class="info-box-green">Add rows to the deletion queue to enable download.</div>', unsafe_allow_html=True)
+            st.markdown(
+                '<div class="info-box-green">No "Reversed" rows were found — nothing to clean up.</div>',
+                unsafe_allow_html=True
+            )
